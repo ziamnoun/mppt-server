@@ -69,7 +69,7 @@ function connectArduino() {
       console.log("⚠ JSON Error:", e.message);
     }
 
-    // Send to UI
+    // Send to UI for
     clients.forEach(ws => {
       if (ws.readyState === 1) ws.send(data);
     });
