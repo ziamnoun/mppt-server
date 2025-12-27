@@ -7,7 +7,7 @@ const path = require("path");
 
 const CSV_PATH = "C:\\Users\\User\\OneDrive\\mppLiveData\\data.csv";
 
-
+//The port which we are using here 
 const COM_PORT = "COM3";
 const BAUD_RATE = 115200;
 
@@ -16,7 +16,7 @@ let parser;
 let clients = [];
 
 const wss = new WebSocketServer({ port: 3001 });
-console.log("✅ WebSocket running at ws://localhost:3001");
+console.log(" WebSocket running at ws://localhost:3001");
 
 
 function initCSV() {
@@ -37,7 +37,7 @@ function logToCSV(json) {
 }
 
 function connectArduino() {
-  console.log("🔌 Trying to connect Arduino...");
+  console.log(" Trying to connect Arduino...");
 
   port = new SerialPort({
     path: COM_PORT,
