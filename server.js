@@ -1,109 +1,209 @@
-const { SerialPort } = require("serialport");
-const { ReadlineParser } = require("@serialport/parser-readline");
-const { WebSocketServer } = require("ws");
+
+const WebSocket = require("ws");
 const fs = require("fs");
 const path = require("path");
+const { SerialPort } = require("serialport");
+const { ReadlineParser } = require("@serialport/parser-readline");
 
+// ------------------ CSV SETUP ------------------
+const csvFile = path.join(__dirname, "mppt_data.csv");
 
-const CSV_PATH = "C:\\Users\\User\\OneDrive\\mppLiveData\\data.csv";
-
-//The port which we are using here 
-const COM_PORT = "COM3";
-const BAUD_RATE = 115200;
-
-let port;
-let parser;
-let clients = [];
-
-const wss = new WebSocketServer({ port: 3001 });
-console.log(" WebSocket running at ws://localhost:3001");
-
-
-function initCSV() {
-  if (!fs.existsSync(CSV_PATH)) {
-    fs.writeFileSync(CSV_PATH, "timestamp,voltage,current,power\n");
-    console.log("📄 CSV created:", CSV_PATH);
-  } else {
-    console.log("📄 CSV found:", CSV_PATH);
-  }
+if (!fs.existsSync(csvFile)) {
+  const headers = [
+    "Time",
+    "Mode",
+    "MainV",
+    "MPPTV",
+    "TargetV",
+    "Error",
+    "Current",
+    "Power",
+    "PWM",
+  ].join(",") + "\n";
+  fs.writeFileSync(csvFile, headers);
 }
 
+// ------------------ SERIAL SETUP ------------------
+const port = new SerialPort({
+  path: "COM5",
+  baudRate: 9600,
+});
 
-function logToCSV(json) {
-  const row = `${Date.now()},${json.v},${json.i},${json.p}\n`;
-  fs.appendFile(CSV_PATH, row, (err) => {
-    if (err) console.log("⚠ CSV Write Error:", err.message);
-  });
-}
+const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
-function connectArduino() {
-  console.log(" Trying to connect Arduino...");
+// ------------------ WEBSOCKET SETUP ------------------
+const wss = new WebSocket.Server({ port: 8080 }, () => {
+  console.log("WebSocket Server started on port 8080");
+});
 
-  port = new SerialPort({
-    path: COM_PORT,
-    baudRate: BAUD_RATE,
-    autoOpen: false
-  });
-
-  port.open((err) => {
-    if (err) {
-      console.log(" Arduino not found, retrying in 2s...");
-      setTimeout(connectArduino, 2000);
-      return;
-    }
-    console.log("✅ Arduino Connected");
-  });
-
-  parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
-
-  parser.on("data", (data) => {
-    data = data.trim();
-    if (!data.startsWith("{")) return;
-
-    console.log("⬆ Arduino:", data);
-
-    try {
-      const json = JSON.parse(data);
-      logToCSV(json); 
-    } catch (e) {
-      console.log("⚠ JSON Error:", e.message);
-    }
-
-    // Send to UI for
-    clients.forEach(ws => {
-      if (ws.readyState === 1) ws.send(data);
-    });
-  });
-
-  port.on("close", () => {
-    console.log(" Arduino Disconnected. Reconnecting...");
-    setTimeout(connectArduino, 2000);
-  });
-
-  port.on("error", (err) => {
-    console.log("⚠ Serial Error:", err.message);
-  });
-}
-
-initCSV();
-connectArduino();
-
-// WebSocket
 wss.on("connection", (ws) => {
-  console.log("🔗 UI Connected");
-  clients.push(ws);
+  console.log("Frontend connected");
 
   ws.on("message", (msg) => {
-    const command = msg.toString().trim();
-    console.log("⬇ UI:", command);
+    console.log("Received from frontend:", msg.toString());
+    port.write(msg.toString());
+  });
 
-    if (port && port.isOpen) {
-      port.write(command + "\n");
+  parser.on("data", (data) => {
+    const line = data.trim();
+    if (!line) return; // skip empty lines
+
+    try {
+      const json = parseArduinoData(line);
+      if (!json) return;
+
+      // Add timestamp in ISO format
+      const timestamp = new Date().toISOString();
+      json.time = timestamp;
+
+      // Send to frontend
+      ws.send(JSON.stringify(json));
+
+      // Append to CSV safely
+      const row = [
+        timestamp,
+        json.mode,
+        json.mainV,
+        json.mpptV,
+        json.targetV,
+        json.error,
+        json.current,
+        json.power,
+        json.pwm,
+      ].join(",") + "\n";
+
+      fs.appendFile(csvFile, row, (err) => {
+        if (err) console.error("Failed to write CSV:", err);
+      });
+
+    } catch (err) {
+      console.error("Failed to parse Arduino data:", err);
+    }
+  });
+}); // <-- Closing bracket for wss.on("connection")
+
+// ------------------ PARSE ARDUINO DATA ------------------
+function parseArduinoData(line) {
+  const obj = {};
+  const parts = line.trim().split("|");
+
+  parts.forEach((part) => {
+    const [key, val] = part.split(":").map((s) => s.trim());
+    switch (key) {
+      case "Mode":
+        obj.mode = val;
+        break;
+      case "MainV":
+        obj.mainV = parseFloat(val);
+        break;
+      case "MPPT":
+        obj.mpptV = parseFloat(val);
+        break;
+      case "TargetV":
+        obj.targetV = parseFloat(val);
+        break;
+      case "Error%":
+        obj.error = parseFloat(val);
+        break;
+      case "I":
+        obj.current = parseFloat(val);
+        break;
+      case "P":
+        obj.power = parseFloat(val);
+        break;
+      case "PWM":
+        obj.pwm = parseInt(val);
+        break;
     }
   });
 
-  ws.on("close", () => {
-    clients = clients.filter(c => c !== ws);
-    console.log("❌ UI Disconnected");
-  });
-});
+  return obj;
+}
+
+
+// // backend/server.js
+// const WebSocket = require("ws");
+
+
+// // Import SerialPort properly
+// const { SerialPort } = require("serialport");
+// const { ReadlineParser } = require("@serialport/parser-readline");
+
+// // Setup serial port
+// const port = new SerialPort({
+//   path: "COM5",    // Arduino COM port
+//   baudRate: 9600,
+// });
+
+// // Setup parser
+// const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
+// // ================== WEBSOCKET SETUP ==================
+// const wss = new WebSocket.Server({ port: 8080 }, () => {
+//   console.log("WebSocket Server started on port 8080");
+// });
+
+// wss.on("connection", (ws) => {
+//   console.log("Frontend connected");
+
+//   // When frontend sends a manual value (1-5 or 'a'/'m')
+//   ws.on("message", (msg) => {
+//     console.log("Received from frontend:", msg.toString());
+
+//     // Forward to Arduino
+//     port.write(msg.toString());
+//   });
+
+//   // When Arduino sends data, forward to all connected clients
+//   parser.on("data", (data) => {
+//     // e.g. data: "Mode: m | MainV: 12.34 V | MPPT: 4.01 V | TargetV: 4 | Error%: 2.25 | I: 150 mA | P: 0.60 W | PWM: 150"
+//     // Convert to JSON for frontend
+//     try {
+//       const json = parseArduinoData(data);
+//       if (json) ws.send(JSON.stringify(json));
+//     } catch (err) {
+//       console.error("Failed to parse Arduino data:", err);
+//     }
+//   });
+// });
+
+// // ================== PARSE ARDUINO DATA ==================
+// function parseArduinoData(line) {
+//   // Split by | and parse each value
+//   const obj = {};
+//   const parts = line.trim().split("|");
+
+//   parts.forEach((part) => {
+//     const [key, val] = part.split(":").map((s) => s.trim());
+//     switch (key) {
+//       case "Mode":
+//         obj.mode = val;
+//         break;
+//       case "MainV":
+//         obj.mainV = parseFloat(val);
+//         break;
+//       case "MPPT":
+//         obj.mpptV = parseFloat(val);
+//         break;
+//       case "TargetV":
+//         obj.targetV = parseFloat(val);
+//         break;
+//       case "Error%":
+//         obj.error = parseFloat(val);
+//         break;
+//       case "I":
+//         obj.current = parseFloat(val);
+//         break;
+//       case "P":
+//         obj.power = parseFloat(val);
+//         break;
+//       case "PWM":
+//         obj.pwm = parseInt(val);
+//         break;
+//       default:
+//         break;
+//     }
+//   });
+
+//   return obj;
+// }
+
